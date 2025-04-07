@@ -1,0 +1,12 @@
+fastapi
+uvicorn 
+httpx 
+google-generativeai
+pandas
+numpy
+pydantic
+python-multipart
+python-dotenv
+requests
+packaging
+gitpython
