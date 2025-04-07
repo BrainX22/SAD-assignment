@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from github_utils import clone_repo, clean_github_url
 from ai_analyzer import analyze_code
-from dependency_scanner import parse_requirements, check_cve_vulnerabilities
+from dependency_scanner import parse_requirements, check_cve_vulnerabilities, check_dependencies
 from typing import Optional, Dict, List
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel

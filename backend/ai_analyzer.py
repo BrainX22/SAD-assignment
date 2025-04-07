@@ -11,13 +11,18 @@ from functools import partial
 load_dotenv()
 
 # Configure the Gemini API
-genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
+api_key = os.getenv('GEMINI_API_KEY')
+if not api_key:
+    print("WARNING: GEMINI_API_KEY not found in environment variables.")
+    print("Static analysis will be used instead of AI analysis.")
+    USE_AI = False
+else:
+    genai.configure(api_key=api_key)
+    USE_AI = True
 
 def analyze_code(path, language="python"):
     """Analyze code in the given path for security vulnerabilities"""
     try:
-        # Initialize Gemini model
-        model = genai.GenerativeModel('gemini-1.0-pro')
         results = []
 
         # Find all files based on language
@@ -32,6 +37,15 @@ def analyze_code(path, language="python"):
                 "analysis": f"No {language} files found in the repository"
             }]
 
+        # Initialize Gemini model if API key is available
+        model = None
+        if USE_AI:
+            try:
+                model = genai.GenerativeModel('gemini-1.0-pro')
+            except Exception as e:
+                print(f"Error initializing Gemini model: {str(e)}")
+                model = None
+                
         # Process files in parallel
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             analyze_file_partial = partial(analyze_single_file, model=model, language=language)
@@ -85,58 +99,55 @@ def analyze_single_file(file_path, model, language="python"):
         # First, do a quick static analysis for common vulnerabilities
         static_analysis = perform_static_analysis(code, language)
         
-        # Then use AI for deeper analysis
-        prompt = f"""
-        As a security code auditor, analyze this {language} code for security vulnerabilities and provide a structured response.
-        Focus on identifying specific security issues, their severity, and recommended fixes.
+        # Try using AI for deeper analysis if model is available
+        if model and USE_AI:
+            try:
+                prompt = f"""
+                As a security code auditor, analyze this {language} code for security vulnerabilities and provide a structured response.
+                Focus on identifying specific security issues, their severity, and recommended fixes.
 
-        Code from {file_path.name}:
-        ```{language}
-        {code}
-        ```
+                Code from {file_path.name}:
+                ```{language}
+                {code}
+                ```
 
-        Provide your analysis in the following format:
-        1. Critical Vulnerabilities (if any)
-        2. High Severity Issues (if any)
-        3. Medium Severity Issues (if any)
-        4. Low Severity Issues (if any)
-        5. Best Practice Recommendations
+                Provide your analysis in the following format:
+                1. Critical Vulnerabilities (if any)
+                2. High Severity Issues (if any)
+                3. Medium Severity Issues (if any)
+                4. Low Severity Issues (if any)
+                5. Best Practice Recommendations
 
-        For each issue found, specify:
-        - The line number or code section
-        - The vulnerability type
-        - Potential impact
-        - Recommended fix
-        """
+                For each issue found, specify:
+                - The line number or code section
+                - The vulnerability type
+                - Potential impact
+                - Recommended fix
+                """
 
-        try:
-            response = model.generate_content(prompt)
-            
-            if hasattr(response, 'text'):
-                return {
-                    "file": str(file_path),
-                    "static_analysis": static_analysis,
-                    "ai_analysis": response.text,
-                    "vulnerabilities_found": bool(static_analysis.get("vulnerabilities", []))
-                }
-            else:
-                recommendations = generate_vulnerability_recommendations(static_analysis, language)
-                return {
-                    "file": str(file_path),
-                    "static_analysis": static_analysis,
-                    "ai_analysis": recommendations,
-                    "vulnerabilities_found": bool(static_analysis.get("vulnerabilities", []))
-                }
-
-        except Exception as analysis_error:
-            print(f"Error analyzing {file_path}: {str(analysis_error)}")
-            recommendations = generate_vulnerability_recommendations(static_analysis, language)
-            return {
-                "file": str(file_path),
-                "static_analysis": static_analysis,
-                "ai_analysis": recommendations,
-                "vulnerabilities_found": bool(static_analysis.get("vulnerabilities", []))
-            }
+                response = model.generate_content(prompt)
+                
+                if hasattr(response, 'text'):
+                    return {
+                        "file": str(file_path),
+                        "static_analysis": static_analysis,
+                        "ai_analysis": response.text,
+                        "vulnerabilities_found": bool(static_analysis.get("vulnerabilities", [])),
+                        "original_code": code
+                    }
+            except Exception as analysis_error:
+                print(f"Error in AI analysis for {file_path}: {str(analysis_error)}")
+                # Fall back to static analysis recommendations
+        
+        # Generate recommendations based on static analysis
+        recommendations = generate_vulnerability_recommendations(static_analysis, language)
+        return {
+            "file": str(file_path),
+            "static_analysis": static_analysis,
+            "ai_analysis": recommendations,
+            "vulnerabilities_found": bool(static_analysis.get("vulnerabilities", [])),
+            "original_code": code
+        }
 
     except Exception as file_error:
         print(f"Error reading {file_path}: {str(file_error)}")

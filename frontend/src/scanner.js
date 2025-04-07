@@ -15,8 +15,16 @@ import {
   FormControl,
   InputLabel,
   Select,
-  MenuItem
+  MenuItem,
+  IconButton,
+  Tooltip,
+  Snackbar,
+  Alert,
+  Card,
+  CardContent,
+  CardActions
 } from '@mui/material';
+import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import axios from 'axios';
 
 const Scanner = () => {
@@ -31,6 +39,9 @@ const Scanner = () => {
   const [scanStatus, setScanStatus] = useState('');
   const [scanId, setScanId] = useState(null);
   const [language, setLanguage] = useState('python');
+  const [snackbarOpen, setSnackbarOpen] = useState(false);
+  const [snackbarMessage, setSnackbarMessage] = useState('');
+  const [correctedCode, setCorrectedCode] = useState({});
 
   const handleTabChange = (event, newValue) => {
     setTab(newValue);
@@ -93,6 +104,110 @@ const Scanner = () => {
     }
   };
 
+  // Function to generate corrected code based on vulnerabilities and AI recommendations
+  const generateCorrectedCode = (result) => {
+    if (!result.static_analysis || !result.static_analysis.vulnerabilities || 
+        result.static_analysis.vulnerabilities.length === 0) {
+      return null;
+    }
+
+    const fileName = result.file.split('\\').pop().split('/').pop();
+    let codeLines = result.original_code ? result.original_code.split('\n') : [];
+    
+    if (codeLines.length === 0) {
+      return null;
+    }
+
+    // Deep copy of code lines to avoid modifying the original
+    let correctedLines = [...codeLines];
+    
+    // Extract corrections from AI analysis
+    let corrections = extractCorrectionsFromAI(result.ai_analysis, result.static_analysis.vulnerabilities);
+    
+    // Apply corrections
+    for (const correction of corrections) {
+      if (correction.lineNumber && correction.suggestedCode) {
+        const lineIndex = correction.lineNumber - 1;
+        if (lineIndex >= 0 && lineIndex < correctedLines.length) {
+          correctedLines[lineIndex] = correction.suggestedCode;
+        }
+      }
+    }
+    
+    return {
+      fileName: fileName,
+      code: correctedLines.join('\n'),
+      hasCorrections: corrections.length > 0
+    };
+  };
+
+  // Function to extract correction suggestions from AI analysis
+  const extractCorrectionsFromAI = (aiAnalysis, vulnerabilities) => {
+    if (!aiAnalysis) return [];
+    
+    const corrections = [];
+    
+    // Simple extraction of lines containing "Recommended fix:" or similar phrases
+    const recommendationPattern = /line\s+(\d+)[\s\S]+?(recommended fix|suggested fix|fix)[\s\S]+?`([^`]+)`/gi;
+    let match;
+    
+    while ((match = recommendationPattern.exec(aiAnalysis)) !== null) {
+      corrections.push({
+        lineNumber: parseInt(match[1]),
+        suggestedCode: match[3].trim()
+      });
+    }
+    
+    // If no corrections found from AI analysis, create simple ones based on vulnerability types
+    if (corrections.length === 0 && vulnerabilities.length > 0) {
+      for (const vuln of vulnerabilities) {
+        const lineNumbers = vuln.line_numbers || (vuln.line_number ? [vuln.line_number] : []);
+        
+        for (const lineNum of lineNumbers) {
+          let suggestion = null;
+          
+          if (vuln.description.includes('eval')) {
+            suggestion = '// SECURITY: Use a safer alternative to eval()';
+          } else if (vuln.description.includes('command injection')) {
+            suggestion = '// SECURITY: Use parameterized commands or input validation';
+          } else if (vuln.description.includes('hardcoded')) {
+            suggestion = '// SECURITY: Use environment variables or secure storage for credentials';
+          } else if (vuln.description.includes('file')) {
+            suggestion = '// SECURITY: Validate file paths and implement proper access controls';
+          }
+          
+          if (suggestion) {
+            corrections.push({
+              lineNumber: lineNum,
+              suggestedCode: suggestion
+            });
+          }
+        }
+      }
+    }
+    
+    return corrections;
+  };
+
+  // Function to copy text to clipboard
+  const copyToClipboard = (text, fileName) => {
+    navigator.clipboard.writeText(text).then(
+      () => {
+        setSnackbarMessage(`${fileName} copied to clipboard`);
+        setSnackbarOpen(true);
+      },
+      (err) => {
+        console.error('Could not copy text: ', err);
+        setSnackbarMessage('Failed to copy to clipboard');
+        setSnackbarOpen(true);
+      }
+    );
+  };
+
+  const handleSnackbarClose = () => {
+    setSnackbarOpen(false);
+  };
+
   const renderResults = () => {
     if (!results) return null;
 
@@ -109,12 +224,23 @@ const Scanner = () => {
             </Typography>
             {results.code_analysis.map((result, index) => {
               // Extract filename from the full path
-              const fileName = result.file.split('\\').pop();
+              const fileName = result.file.split('\\').pop().split('/').pop();
               
               // Check if there are vulnerabilities in static analysis
               const hasVulnerabilities = result.static_analysis && 
                                         result.static_analysis.vulnerabilities && 
                                         result.static_analysis.vulnerabilities.length > 0;
+              
+              // Generate corrected code if there are vulnerabilities
+              if (hasVulnerabilities && !correctedCode[fileName]) {
+                const generatedCode = generateCorrectedCode(result);
+                if (generatedCode) {
+                  setCorrectedCode(prev => ({
+                    ...prev,
+                    [fileName]: generatedCode
+                  }));
+                }
+              }
               
               return (
                 <Box key={index} sx={{ mb: 3, border: '1px solid #e0e0e0', borderRadius: 1, p: 2 }}>
@@ -159,6 +285,41 @@ const Scanner = () => {
                         {result.ai_analysis}
                       </Typography>
                     </Box>
+                  )}
+                  
+                  {/* Corrected Code Section */}
+                  {correctedCode[fileName] && correctedCode[fileName].hasCorrections && (
+                    <Card variant="outlined" sx={{ mt: 2, bgcolor: '#f8f9fa' }}>
+                      <CardContent>
+                        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+                          <Typography variant="body2" color="success.main" sx={{ fontWeight: 'bold' }}>
+                            Suggested Fixed Code:
+                          </Typography>
+                          <Tooltip title="Copy to clipboard">
+                            <IconButton 
+                              size="small" 
+                              onClick={() => copyToClipboard(correctedCode[fileName].code, fileName)}
+                              aria-label="copy to clipboard"
+                            >
+                              <ContentCopyIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                        </Box>
+                        <Box 
+                          component="pre" 
+                          sx={{ 
+                            p: 1, 
+                            bgcolor: '#f1f8e9', 
+                            borderRadius: 1, 
+                            overflow: 'auto',
+                            fontSize: '0.8rem',
+                            maxHeight: '300px'
+                          }}
+                        >
+                          {correctedCode[fileName].code}
+                        </Box>
+                      </CardContent>
+                    </Card>
                   )}
                 </Box>
               );
@@ -317,6 +478,17 @@ const Scanner = () => {
       {renderProgress()}
 
       {renderResults()}
+
+      <Snackbar
+        open={snackbarOpen}
+        autoHideDuration={3000}
+        onClose={handleSnackbarClose}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert onClose={handleSnackbarClose} severity="success" variant="filled">
+          {snackbarMessage}
+        </Alert>
+      </Snackbar>
     </Container>
   );
 };
