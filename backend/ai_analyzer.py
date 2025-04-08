@@ -28,20 +28,30 @@ def analyze_code(path, language="python"):
         # Find all files based on language
         if language == "python":
             files = list(Path(path).rglob("*.py"))
-        else:  # javascript
+        elif language == "javascript":  # Explicit check for javascript 
             files = list(Path(path).rglob("*.js"))
+        else:  # Handle any other language
+            files = []
             
         if not files:
             return [{
                 "file": "info",
-                "analysis": f"No {language} files found in the repository"
+                "analysis": f"No {language} files found in the repository",
+                "vulnerabilities_found": False,
+                "total_vulnerabilities": 0
             }]
 
         # Initialize Gemini model if API key is available
         model = None
         if USE_AI:
             try:
-                model = genai.GenerativeModel('gemini-1.0-pro')
+                # Make sure we're using the correct model name
+                model = genai.GenerativeModel('gemini-pro')
+                # Test the model with a simple prompt to verify it works
+                test_response = model.generate_content("Respond with OK if you can process this message.")
+                if not hasattr(test_response, 'text') or "OK" not in test_response.text:
+                    print("Warning: Model test failed, falling back to static analysis only")
+                    model = None
             except Exception as e:
                 print(f"Error initializing Gemini model: {str(e)}")
                 model = None
@@ -60,31 +70,39 @@ def analyze_code(path, language="python"):
                         results.append(result)
                 except concurrent.futures.TimeoutError:
                     print(f"Analysis timeout for {file_path}")
+                    empty_analysis = perform_static_analysis("", language)
                     results.append({
                         "file": str(file_path),
-                        "static_analysis": perform_static_analysis("", language),
+                        "static_analysis": empty_analysis,
                         "ai_analysis": "Analysis timed out. Please try again with a smaller codebase or contact support.",
-                        "vulnerabilities_found": False
+                        "vulnerabilities_found": False,
+                        "total_vulnerabilities": 0
                     })
                 except Exception as e:
                     print(f"Error analyzing {file_path}: {str(e)}")
+                    empty_analysis = perform_static_analysis("", language)
                     results.append({
                         "file": str(file_path),
-                        "static_analysis": perform_static_analysis("", language),
+                        "static_analysis": empty_analysis,
                         "ai_analysis": "Analysis failed. Please try again or contact support.",
-                        "vulnerabilities_found": False
+                        "vulnerabilities_found": False,
+                        "total_vulnerabilities": 0
                     })
 
         return results if results else [{
             "file": "info",
-            "analysis": f"No valid {language} files could be analyzed"
+            "analysis": f"No valid {language} files could be analyzed",
+            "vulnerabilities_found": False,
+            "total_vulnerabilities": 0
         }]
 
     except Exception as e:
         print(f"Error in code analysis: {str(e)}")
         return [{
             "file": "error",
-            "analysis": f"Analysis failed: {str(e)}"
+            "analysis": f"Analysis failed: {str(e)}",
+            "vulnerabilities_found": False,
+            "total_vulnerabilities": 0
         }]
 
 def analyze_single_file(file_path, model, language="python"):
@@ -94,7 +112,15 @@ def analyze_single_file(file_path, model, language="python"):
             code = f.read()
 
         if not code.strip():
-            return None
+            empty_analysis = perform_static_analysis("", language)
+            return {
+                "file": str(file_path),
+                "static_analysis": empty_analysis,
+                "ai_analysis": "File is empty.",
+                "vulnerabilities_found": False,
+                "total_vulnerabilities": 0,
+                "original_code": ""
+            }
 
         # First, do a quick static analysis for common vulnerabilities
         static_analysis = perform_static_analysis(code, language)
@@ -133,6 +159,7 @@ def analyze_single_file(file_path, model, language="python"):
                         "static_analysis": static_analysis,
                         "ai_analysis": response.text,
                         "vulnerabilities_found": bool(static_analysis.get("vulnerabilities", [])),
+                        "total_vulnerabilities": len(static_analysis.get("vulnerabilities", [])),
                         "original_code": code
                     }
             except Exception as analysis_error:
@@ -146,139 +173,259 @@ def analyze_single_file(file_path, model, language="python"):
             "static_analysis": static_analysis,
             "ai_analysis": recommendations,
             "vulnerabilities_found": bool(static_analysis.get("vulnerabilities", [])),
+            "total_vulnerabilities": len(static_analysis.get("vulnerabilities", [])),
             "original_code": code
         }
 
     except Exception as file_error:
         print(f"Error reading {file_path}: {str(file_error)}")
+        empty_analysis = perform_static_analysis("", language)
         return {
             "file": str(file_path),
+            "static_analysis": empty_analysis,
             "analysis": f"File reading error: {str(file_error)}",
-            "vulnerabilities_found": False
+            "vulnerabilities_found": False,
+            "total_vulnerabilities": 0
         }
 
 def perform_static_analysis(code, language="python"):
     """Perform static analysis on the code"""
     vulnerabilities = []
     
+    # Define vulnerability types
+    SQL_INJECTION = "SQL Injection"
+    XSS = "Cross-Site Scripting (XSS)"
+    COMMAND_INJECTION = "Command Injection"
+    PATH_TRAVERSAL = "Path Traversal"
+    INSECURE_DESERIALIZATION = "Insecure Deserialization"
+    INSECURE_CRYPTO = "Insecure Cryptography"
+    HARDCODED_CREDENTIALS = "Hardcoded Credentials"
+    INSECURE_RANDOM = "Insecure Random Number Generation"
+    BUFFER_OVERFLOW = "Buffer Overflow"
+    FORMAT_STRING = "Format String Vulnerability"
+    INSECURE_DEFAULT = "Insecure Default Configuration"
+    CSRF = "Cross-Site Request Forgery (CSRF)"
+    OPEN_REDIRECT = "Open Redirect"
+    XXE = "XML External Entity (XXE)"
+    SSRF = "Server-Side Request Forgery (SSRF)"
+    IDOR = "Insecure Direct Object Reference (IDOR)"
+    BROKEN_AUTH = "Broken Authentication"
+    SESSION_MANAGEMENT = "Insecure Session Management"
+    FILE_UPLOAD = "Insecure File Upload"
+    INSECURE_DEPENDENCY = "Insecure Dependency"
+    
+    # Skip empty code
+    if not code or not code.strip():
+        return {
+            "vulnerabilities": [],
+            "total_vulnerabilities": 0,
+            "suggested_fixes": []
+        }
+    
     if language == "python":
         # Python-specific checks
-        dangerous_functions = {
-            "eval": "Use of eval() can lead to code injection",
-            "exec": "Use of exec() can lead to code injection",
-            "os.system": "Use of os.system() can lead to command injection",
-            "subprocess.call": "Use of subprocess.call() with shell=True can lead to command injection",
-            "pickle.loads": "Use of pickle.loads() can lead to code injection",
-            "yaml.load": "Use of yaml.load() can lead to code injection",
-            "marshal.loads": "Use of marshal.loads() can lead to code injection"
+        
+        # Check for command injection vulnerabilities
+        command_injection_patterns = {
+            r'os\.system\s*\(': COMMAND_INJECTION,
+            r'subprocess\.call\s*\(': COMMAND_INJECTION,
+            r'subprocess\.Popen\s*\(': COMMAND_INJECTION,
+            r'subprocess\.run\s*\(': COMMAND_INJECTION,
+            r'exec\s*\(': COMMAND_INJECTION,
+            r'eval\s*\(': COMMAND_INJECTION,
         }
         
-        for func, desc in dangerous_functions.items():
-            if func in code:
-                line_numbers = [i+1 for i, line in enumerate(code.split('\n')) if func in line]
+        for pattern, vuln_type in command_injection_patterns.items():
+            matches = re.finditer(pattern, code)
+            for match in matches:
+                line_number = code[:match.start()].count('\n') + 1
+                line_content = code.split('\n')[line_number - 1].strip()
                 vulnerabilities.append({
                     "severity": "Critical",
-                    "description": desc,
-                    "line_numbers": line_numbers
+                    "description": f"{vuln_type} vulnerability detected",
+                    "line_number": line_number,
+                    "line_content": line_content,
+                    "suggested_fix": f"Replace {line_content} with subprocess.run(command, shell=False, check=True) for safer command execution"
+                })
+        
+        # Check for SQL injection vulnerabilities
+        sql_injection_patterns = {
+            r'execute\s*\(\s*[\'"][^\']*%s': SQL_INJECTION,
+            r'execute\s*\(\s*[\'"][^\']*{': SQL_INJECTION,
+            r'execute\s*\(\s*[\'"][^\']*\+': SQL_INJECTION,
+            r'executemany\s*\(\s*[\'"][^\']*\+': SQL_INJECTION,
+            r'cursor\.execute\s*\(\s*[\'"][^\']*\+': SQL_INJECTION,
+            r'cursor\.execute\s*\(\s*f[\'"]': SQL_INJECTION,
+            r'raw\s*\(\s*[\'"][^\']*\+': SQL_INJECTION,
+        }
+        
+        for pattern, vuln_type in sql_injection_patterns.items():
+            matches = re.finditer(pattern, code)
+            for match in matches:
+                line_number = code[:match.start()].count('\n') + 1
+                line_content = code.split('\n')[line_number - 1].strip()
+                vulnerabilities.append({
+                    "severity": "Critical",
+                    "description": f"{vuln_type} vulnerability detected",
+                    "line_number": line_number,
+                    "line_content": line_content,
+                    "suggested_fix": f"Replace {line_content} with parameterized queries: cursor.execute('SELECT * FROM users WHERE id = %s', (user_id,))"
+                })
+        
+        # Check for path traversal vulnerabilities
+        path_traversal_patterns = {
+            r'open\s*\(\s*.*\+': PATH_TRAVERSAL,
+            r'os\.path\.join\s*\(.*\+': PATH_TRAVERSAL,
+            r'os\.makedirs\s*\(.*\+': PATH_TRAVERSAL,
+            r'os\.mkdir\s*\(.*\+': PATH_TRAVERSAL,
+            r'os\.rename\s*\(.*\+': PATH_TRAVERSAL,
+            r'os\.remove\s*\(.*\+': PATH_TRAVERSAL,
+        }
+        
+        for pattern, vuln_type in path_traversal_patterns.items():
+            matches = re.finditer(pattern, code)
+            for match in matches:
+                line_number = code[:match.start()].count('\n') + 1
+                line_content = code.split('\n')[line_number - 1].strip()
+                vulnerabilities.append({
+                    "severity": "High",
+                    "description": f"{vuln_type} vulnerability detected",
+                    "line_number": line_number,
+                    "line_content": line_content,
+                    "suggested_fix": f"Replace {line_content} with os.path.normpath(os.path.join(base_dir, filename)) to prevent path traversal"
                 })
         
         # Check for hardcoded credentials
         credential_patterns = [
-            (r'password\s*=\s*[\'"][^\'"]+[\'"]', "Hardcoded password detected"),
-            (r'api_key\s*=\s*[\'"][^\'"]+[\'"]', "Hardcoded API key detected"),
-            (r'secret\s*=\s*[\'"][^\'"]+[\'"]', "Hardcoded secret detected")
+            (r'password\s*=\s*[\'"][^\'"]+[\'"]', HARDCODED_CREDENTIALS),
+            (r'passwd\s*=\s*[\'"][^\'"]+[\'"]', HARDCODED_CREDENTIALS),
+            (r'pwd\s*=\s*[\'"][^\'"]+[\'"]', HARDCODED_CREDENTIALS),
+            (r'api_key\s*=\s*[\'"][^\'"]+[\'"]', HARDCODED_CREDENTIALS),
+            (r'apikey\s*=\s*[\'"][^\'"]+[\'"]', HARDCODED_CREDENTIALS),
+            (r'secret\s*=\s*[\'"][^\'"]+[\'"]', HARDCODED_CREDENTIALS),
+            (r'access_token\s*=\s*[\'"][^\'"]+[\'"]', HARDCODED_CREDENTIALS),
+            (r'auth_token\s*=\s*[\'"][^\'"]+[\'"]', HARDCODED_CREDENTIALS),
         ]
         
         for pattern, desc in credential_patterns:
             matches = re.finditer(pattern, code, re.IGNORECASE)
             for match in matches:
                 line_number = code[:match.start()].count('\n') + 1
+                line_content = code.split('\n')[line_number - 1].strip()
                 vulnerabilities.append({
                     "severity": "Critical",
-                    "description": desc,
-                    "line_number": line_number
+                    "description": f"{desc} detected",
+                    "line_number": line_number,
+                    "line_content": line_content,
+                    "suggested_fix": f"Replace {line_content} with environment variables: {line_content.split('=')[0].strip()} = os.getenv('{line_content.split('=')[0].strip().upper()}')"
                 })
         
-        # Check for unsafe file operations
-        unsafe_file_patterns = [
-            (r'open\([^,]+,\s*[\'"]w[\'"]\)', "Unsafe file write operation"),
-            (r'open\([^,]+,\s*[\'"]a[\'"]\)', "Unsafe file append operation")
-        ]
+        # Check for insecure cryptography
+        crypto_patterns = {
+            r'random\.randint': INSECURE_RANDOM,
+            r'random\.random': INSECURE_RANDOM,
+            r'hashlib\.md5': INSECURE_CRYPTO,
+            r'hashlib\.sha1': INSECURE_CRYPTO,
+            r'Crypto\.Cipher\.DES': INSECURE_CRYPTO,
+            r'Crypto\.Cipher\.Blowfish': INSECURE_CRYPTO,
+            r'cryptography\.hazmat\.primitives\.ciphers\.algorithms\.ARC4': INSECURE_CRYPTO,
+        }
         
-        for pattern, desc in unsafe_file_patterns:
+        for pattern, vuln_type in crypto_patterns.items():
             matches = re.finditer(pattern, code)
             for match in matches:
                 line_number = code[:match.start()].count('\n') + 1
+                line_content = code.split('\n')[line_number - 1].strip()
+                vulnerabilities.append({
+                    "severity": "Medium",
+                    "description": f"{vuln_type} vulnerability detected",
+                    "line_number": line_number,
+                    "line_content": line_content,
+                    "suggested_fix": f"Replace {line_content} with secure alternatives: use secrets.token_bytes() for random numbers and hashlib.sha256() for hashing"
+                })
+        
+        # Check for insecure deserialization
+        deserialize_patterns = {
+            r'pickle\.loads': INSECURE_DESERIALIZATION,
+            r'pickle\.load\s*\(': INSECURE_DESERIALIZATION,
+            r'marshal\.loads': INSECURE_DESERIALIZATION,
+            r'yaml\.load\s*\((?!.*Loader=yaml\.SafeLoader)': INSECURE_DESERIALIZATION,
+            r'json\.loads\s*\(.*\)': INSECURE_DESERIALIZATION,
+        }
+        
+        for pattern, vuln_type in deserialize_patterns.items():
+            matches = re.finditer(pattern, code)
+            for match in matches:
+                line_number = code[:match.start()].count('\n') + 1
+                line_content = code.split('\n')[line_number - 1].strip()
                 vulnerabilities.append({
                     "severity": "High",
-                    "description": desc,
-                    "line_number": line_number
+                    "description": f"{vuln_type} vulnerability detected",
+                    "line_number": line_number,
+                    "line_content": line_content,
+                    "suggested_fix": f"Replace {line_content} with safe alternatives: use yaml.safe_load() for YAML and json.loads() with proper validation for JSON"
+                })
+        
+        # Check for SSRF vulnerabilities
+        ssrf_patterns = {
+            r'urllib\.request\.urlopen\s*\(': SSRF,
+            r'requests\.get\s*\(': SSRF,
+            r'requests\.post\s*\(': SSRF,
+            r'requests\.put\s*\(': SSRF,
+            r'requests\.delete\s*\(': SSRF,
+            r'http\.client\.HTTPConnection\s*\(': SSRF,
+        }
+        
+        for pattern, vuln_type in ssrf_patterns.items():
+            matches = re.finditer(pattern, code)
+            for match in matches:
+                line_number = code[:match.start()].count('\n') + 1
+                line_content = code.split('\n')[line_number - 1].strip()
+                vulnerabilities.append({
+                    "severity": "Medium",
+                    "description": f"Potential {vuln_type} vulnerability detected",
+                    "line_number": line_number,
+                    "line_content": line_content,
+                    "suggested_fix": f"Replace {line_content} with URL validation and whitelisting: validate_url(url) and requests.get(url, timeout=5, allow_redirects=False)"
+                })
+        
+        # Check for XXE vulnerabilities
+        xxe_patterns = {
+            r'ElementTree\.parse\s*\(': XXE,
+            r'etree\.parse\s*\(': XXE,
+            r'xml\.dom\.minidom\.parse\s*\(': XXE,
+            r'lxml\.etree\.parse\s*\(': XXE,
+        }
+        
+        for pattern, vuln_type in xxe_patterns.items():
+            matches = re.finditer(pattern, code)
+            for match in matches:
+                line_number = code[:match.start()].count('\n') + 1
+                line_content = code.split('\n')[line_number - 1].strip()
+                vulnerabilities.append({
+                    "severity": "High",
+                    "description": f"Potential {vuln_type} vulnerability detected",
+                    "line_number": line_number,
+                    "line_content": line_content,
+                    "suggested_fix": f"Replace {line_content} with safe XML parsing: parser = ET.XMLParser(resolve_entities=False) and ET.parse(xml_data, parser=parser)"
                 })
     
-    else:  # JavaScript
-        # JavaScript-specific checks
-        dangerous_functions = {
-            "eval": "Use of eval() can lead to code injection",
-            "Function": "Use of Function constructor can lead to code injection",
-            "setTimeout": "Use of setTimeout with string argument can lead to code injection",
-            "setInterval": "Use of setInterval with string argument can lead to code injection"
-        }
-        
-        for func, desc in dangerous_functions.items():
-            if func in code:
-                line_numbers = [i+1 for i, line in enumerate(code.split('\n')) if func in line]
-                vulnerabilities.append({
-                    "severity": "Critical",
-                    "description": desc,
-                    "line_numbers": line_numbers
-                })
-        
-        # Check for hardcoded credentials
-        credential_patterns = [
-            (r'password\s*=\s*[\'"][^\'"]+[\'"]', "Hardcoded password detected"),
-            (r'apiKey\s*=\s*[\'"][^\'"]+[\'"]', "Hardcoded API key detected"),
-            (r'secret\s*=\s*[\'"][^\'"]+[\'"]', "Hardcoded secret detected")
-        ]
-        
-        for pattern, desc in credential_patterns:
-            matches = re.finditer(pattern, code, re.IGNORECASE)
-            for match in matches:
-                line_number = code[:match.start()].count('\n') + 1
-                vulnerabilities.append({
-                    "severity": "Critical",
-                    "description": desc,
-                    "line_number": line_number
-                })
-        
-        # Check for unsafe DOM operations
-        unsafe_dom_patterns = [
-            (r'document\.write\s*\(', "Unsafe DOM manipulation using document.write"),
-            (r'innerHTML\s*=', "Unsafe DOM manipulation using innerHTML"),
-            (r'outerHTML\s*=', "Unsafe DOM manipulation using outerHTML")
-        ]
-        
-        for pattern, desc in unsafe_dom_patterns:
-            matches = re.finditer(pattern, code)
-            for match in matches:
-                line_number = code[:match.start()].count('\n') + 1
-                vulnerabilities.append({
-                    "severity": "High",
-                    "description": desc,
-                    "line_number": line_number
-                })
-
     return {
         "vulnerabilities": vulnerabilities,
-        "total_vulnerabilities": len(vulnerabilities)
+        "total_vulnerabilities": len(vulnerabilities),
+        "suggested_fixes": [v["suggested_fix"] for v in vulnerabilities if "suggested_fix" in v]
     }
 
 def generate_vulnerability_recommendations(static_analysis, language="python"):
     """Generate specific recommendations based on found vulnerabilities"""
-    if not static_analysis or not static_analysis.get("vulnerabilities"):
+    if not static_analysis:
+        return ""  # Return empty string for None
+        
+    vulnerabilities = static_analysis.get("vulnerabilities", [])
+    if not vulnerabilities:
         return ""  # Return empty string if no vulnerabilities found
 
     recommendations = []
-    vulnerabilities = static_analysis["vulnerabilities"]
 
     for vuln in vulnerabilities:
         severity = vuln.get("severity", "").lower()
