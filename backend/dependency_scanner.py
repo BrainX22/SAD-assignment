@@ -1,6 +1,5 @@
 import re
 from packaging import version
-import requests
 import json
 import os
 from pathlib import Path
